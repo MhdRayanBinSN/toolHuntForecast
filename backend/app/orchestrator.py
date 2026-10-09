@@ -130,16 +130,33 @@ async def run_pipeline(run_id: int):
         if len(candidates)<2:
             reason="Product Hunt token is missing." if not get_settings().producthunt_token else "Fewer than two relevant products matched this category. Add category keywords or broaden the topic, then retry."
             raise RuntimeError(reason)
-        current_stage="score"; stage_started=_begin_stage(run_id,"score","Checking and scoring candidates"); start=stage_started; scored=[]
+        current_stage="score"; stage_started=_begin_stage(run_id,"score","Checking and scoring candidates"); start=stage_started; scored=[]; ranked_candidates=[]
         with Session(engine) as s:
             for cid in candidates:
                 c=s.get(Candidate,cid)
-                status,_,_=await fetch(c.url)
-                scores=candidate_score({"name":c.name,"tagline":c.tagline,"description":c.description,"votes":c.ph_votes,"source":c.sources_json},category,liveness=1.0 if status==200 else 0.0,keywords=category_keywords)
-                c.scores_json=json.dumps(scores); c.status="new" if status==200 and scores["category_fit"]>=.30 else "rejected"; s.add(c)
-                if status==200 and scores["category_fit"]>=.30: scored.append((scores["total"],cid))
-            s.commit()
-        _stage(run_id,"score","ok",int((time.monotonic()-start)*1000),{"scored":len(scored)})
+                if not c: continue
+                details={"name":c.name,"tagline":c.tagline,"description":c.description,"votes":c.ph_votes,"source":c.sources_json}
+                pre_score=candidate_score(details,category,liveness=0.0,keywords=category_keywords)
+                ranked_candidates.append((pre_score["total"],cid,{"url":c.url,"details":details,"pre_score":pre_score}))
+        ranked_candidates.sort(key=lambda item:(item[0],item[1]),reverse=True)
+        try: candidate_check_limit=max(2,int(get_settings().topics.get("candidate_check_limit",12)))
+        except (TypeError,ValueError): candidate_check_limit=12
+        shortlist=ranked_candidates[:candidate_check_limit]
+        async def probe_candidate(url):
+            try: return await fetch(url)
+            except Exception as exc:
+                log.info("Candidate site check failed for %s: %s",url,exc)
+                return 0,"","unavailable"
+        site_results=await asyncio.gather(*(probe_candidate(item[2]["url"]) for item in shortlist))
+        for (_,cid,item),(status,_,_) in zip(shortlist,site_results):
+            scores=candidate_score(item["details"],category,liveness=1.0 if status==200 else 0.0,keywords=category_keywords)
+            with Session(engine) as s:
+                c=s.get(Candidate,cid)
+                if c:
+                    c.scores_json=json.dumps(scores); c.status="new" if status==200 and scores["category_fit"]>=.30 else "rejected"; s.add(c); s.commit()
+            if status==200 and scores["category_fit"]>=.30: scored.append((scores["total"],cid))
+        score_output={"candidates_found":len(candidates),"sites_checked":len(shortlist),"site_check_limit":candidate_check_limit,"live_candidates":sum(1 for status,_,_ in site_results if status==200),"category_matched_candidates":len(scored)}
+        _stage(run_id,"score","ok",int((time.monotonic()-start)*1000),score_output)
         if len(scored)<2: raise RuntimeError("Fewer than two live, category-matched candidates were found. Try a broader category or configure more discovery sources.")
         current_stage="select"; stage_started=_begin_stage(run_id,"select","Selecting products for comparison")
         scored.sort(reverse=True); chosen=scored[:2]

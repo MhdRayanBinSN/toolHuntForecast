@@ -5,6 +5,7 @@ page_topics:
   integrations: "integrations, connect with other tools, API, plugins"
   trust: "security, customers, case studies, testimonials, compliance"
 required_topics: [pricing, features]
+candidate_check_limit: 12
 # Category-specific vocabulary for matching broad categories to product descriptions.
 category_keywords:
   crm pipeline:
@@ -14,7 +15,30 @@ category_keywords:
     - sales pipeline
     - deal management
     - opportunity management
+  cold email generation:
+    - cold email
+    - cold outreach
+    - outbound email
+    - email outreach
+    - email sequencing
+    - sales sequence
+    - email personalization
+    - email deliverability
+  sales engagement:
+    - sales engagement
+    - sales outreach
+    - sales enablement
+    - sales automation
+    - outbound sales
+    - prospecting software
+    - sales sequences
 category_topic_slugs:
   crm pipeline:
     - crm
+  cold email generation:
+    - email
+    - email-marketing
+    - sales
+  sales engagement:
+    - sales
 directories: []
