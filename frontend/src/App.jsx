@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Activity, ArrowDownToLine, ArrowLeft, ArrowRight, BarChart3, Check, ChevronRight, CircleHelp, Clock3, ExternalLink, FileText, Filter, LayoutDashboard, LayoutGrid, Menu, Moon, Plus, Search, Settings2, Sun, X } from 'lucide-react';
-import { getCategories, getReport, getReports, getRun, getRuns, startRun } from './api.js';
+import { getCategories, getReport, getReports, getRun, getRuns, getSchedule, startRun } from './api.js';
 import { Categories, Candidates, ComparisonHub, NotFound, StyleGuide } from './ExtraPages.jsx';
 
 const stages = ['collect','score','select','research_a','research_b','screenshots','compare','write','render'];
 const titleStage = (value='') => value.replaceAll('_',' ').replace(/\b\w/g, m => m.toUpperCase());
 const dateLabel = value => value ? new Date(value).toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : 'Not started';
+const dateLabelUTC = value => value ? `${new Date(value).toLocaleString([], { timeZone:'UTC', month:'short', day:'numeric', hour:'numeric', minute:'2-digit', timeZoneName:'short' })}` : 'Not scheduled';
 const errText = e => e?.message || 'The request could not be completed.';
 
 function useData(load, deps=[]) {
@@ -54,8 +55,8 @@ function Pipeline({run}){const map=new Map((run?.stages||[]).map(s=>[s.stage,s.s
 function LatestReport({report}){const m=report.matrix||{},a=m.a||{},b=m.b||{};return <Link className="latest-report panel" to={`/app/reports/${report.id}`}><div className="latest-visual"><div className="product-tile tile-a"><span>A</span><strong>{initials(a.name)}</strong><small>{a.name||'Product A'}</small></div><div className="versus">VS</div><div className="product-tile tile-b"><span>B</span><strong>{initials(b.name)}</strong><small>{b.name||'Product B'}</small></div></div><div className="latest-copy"><div className="latest-top"><span className="tiny-label">LATEST COMPARISON</span><Badge status={report.status}/></div><h3>{a.name||'Product A'} <span>vs</span> {b.name||'Product B'}</h3><p>{m.category||'Software products'} · Published {dateLabel(report.created_at)}</p><span className="inline-link">Read report <ArrowRight size={15}/></span></div><ChevronRight className="latest-chevron" size={19}/></Link>}
 function initials(value=''){return value.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase()||'—'}
 
-function Runs(){const {data,error,loading,reload}=useData(getRuns);return <><PageHeader eyebrow="ACTIVITY" title="Runs" description="Follow each research run from discovery through publication."/><div className="toolbar"><span>{data?.length||0} runs</span><button className="btn btn-secondary btn-small" onClick={reload}>Refresh</button></div>{loading?<Loading/>:error?<ErrorState error={error} onRetry={reload}/>:data?.length?<RunTable runs={data}/>:<Empty title="No runs yet" body="Start a run from Overview to begin researching a category." action={<Link className="btn btn-primary btn-small" to="/">Go to overview</Link>}/>}</>}
-function RunTable({runs}){return <div className="data-table-wrap panel"><table className="data-table"><thead><tr><th>Run</th><th>Category</th><th>Status</th><th>Started</th><th>Latest update</th><th/></tr></thead><tbody>{runs.map(r=><tr key={r.id}><td><Link className="run-id" to={`/app/runs/${r.id}`}>#{r.id}</Link></td><td>{r.category}</td><td><Badge status={r.status}/></td><td>{dateLabel(r.started_at)}</td><td className="muted-cell">{r.message}</td><td><Link className="table-arrow" to={`/app/runs/${r.id}`} aria-label={`Open run ${r.id}`}><ArrowRight size={16}/></Link></td></tr>)}</tbody></table></div>}
+function Runs(){const {data,error,loading,reload}=useData(getRuns);const schedule=useData(getSchedule);return <><PageHeader eyebrow="ACTIVITY" title="Runs" description="Follow each research run from discovery through publication."/><div className="schedule-banner panel"><div className="schedule-indicator"/><div><strong>{schedule.data?.enabled?'Daily runs are on':'Daily runs are off'}</strong><p>{schedule.loading?'Checking schedule…':schedule.error?schedule.error:schedule.data?.enabled?`All ${schedule.data.active_categories} active configurations · ${schedule.data.cron} UTC · next ${dateLabelUTC(schedule.data.next_run)}`:'Enable the scheduler in your backend environment to run categories automatically.'}</p></div></div><div className="toolbar"><span>{data?.length||0} runs</span><button className="btn btn-secondary btn-small" onClick={reload}>Refresh</button></div>{loading?<Loading/>:error?<ErrorState error={error} onRetry={reload}/>:data?.length?<RunTable runs={data}/>:<Empty title="No runs yet" body="Start a run from Overview to begin researching a category." action={<Link className="btn btn-primary btn-small" to="/">Go to overview</Link>}/>}</>}
+function RunTable({runs}){return <div className="data-table-wrap panel"><table className="data-table"><thead><tr><th>Run</th><th>Category</th><th>Status</th><th>Started (UTC)</th><th>Run time</th><th>Latest update</th><th/></tr></thead><tbody>{runs.map(r=><tr key={r.id}><td><Link className="run-id" to={`/app/runs/${r.id}`}>#{r.id}</Link></td><td>{r.category}</td><td><Badge status={r.status}/></td><td>{r.started_at?dateLabelUTC(r.started_at):'Not started'}</td><td>{r.started_at?formatRunDuration(r.runtime_ms):'—'}</td><td className="muted-cell">{r.message}</td><td><Link className="table-arrow" to={`/app/runs/${r.id}`} aria-label={`Open run ${r.id}`}><ArrowRight size={16}/></Link></td></tr>)}</tbody></table></div>}
 
 function RunDetail(){
   const {id}=useParams();
@@ -68,6 +69,7 @@ function RunDetail(){
   },[data?.status,reload]);
   const logMap=new Map((data?.stages||[]).map(s=>[s.stage,s]));
   const usage=data?.token_usage||{input_tokens:0,output_tokens:0,total_tokens:0,calls:0};
+  const runtime=data?.runtime_ms||0;
   const failure=data?.failure||(data?.status==='failed'&&data?.error?{reason:data.error}:null);
   return <>
     {loading&&!data?<Loading rows={4}/>:error?<><Link className="back-link" to="/app/runs"><ArrowLeft size={15}/> All runs</Link><ErrorState error={error} onRetry={reload}/></>:data&&<>
@@ -81,7 +83,9 @@ function RunDetail(){
           <article className="token-card panel"><span>INPUT TOKENS</span><strong>{Number(usage.input_tokens||0).toLocaleString()}</strong></article>
           <article className="token-card panel"><span>OUTPUT TOKENS</span><strong>{Number(usage.output_tokens||0).toLocaleString()}</strong></article>
           <article className="token-card panel"><span>TOTAL TOKENS</span><strong>{Number(usage.total_tokens||0).toLocaleString()}</strong></article>
+          <article className="token-card panel"><span>RUN TIME</span><strong>{data.started_at?formatRunDuration(runtime):'—'}</strong></article>
         </div>
+        <p className="token-note">Started: {dateLabelUTC(data.started_at)} · Finished: {data.finished_at?dateLabelUTC(data.finished_at):'Still running'}</p>
         <p className="token-note">{usage.calls?`Usage totals are reported by the provider across ${usage.calls} AI calls.`:'No AI model calls were made in this run; the pipeline used deterministic processing, so token usage is 0.'}</p>
       </section>
       <section className="section-block">
@@ -101,6 +105,7 @@ function RunDetail(){
 }
 function stageSummary(key,row){if(row?.status==='failed')return row.error||'This stage stopped with an error.';if(row?.status==='partial')return row.output?.message||'Stage finished with partial results.';if(row?.status==='ok'||row?.status==='done')return row.output?.message||'Stage completed successfully.';if(row?.status==='running')return row.output?.message||'Stage is running.';return 'Waiting for the previous stage to finish.'}
 function formatDuration(ms=0){if(ms<1000)return `${Math.round(ms)} ms`;return `${(ms/1000).toFixed(1)} s`}
+function formatRunDuration(ms=0){const seconds=Math.floor(ms/1000);if(seconds<60)return `${seconds}s`;const minutes=Math.floor(seconds/60);if(minutes<60)return `${minutes}m ${seconds%60}s`;const hours=Math.floor(minutes/60);return `${hours}h ${minutes%60}m`}
 
 function Reports(){const {data,error,loading,reload}=useData(getReports);const [query,setQuery]=useState('');const filtered=(data||[]).filter(r=>{const m=r.matrix||{};return `${m.category||''} ${m.a?.name||''} ${m.b?.name||''}`.toLowerCase().includes(query.toLowerCase())});return <><PageHeader eyebrow="RESEARCH LIBRARY" title="Reports" description="Side-by-side product research, saved with its source trail."/><div className="toolbar"><div className="search-box"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search reports" aria-label="Search reports"/></div><span>{filtered.length} reports</span></div>{loading?<Loading rows={4}/>:error?<ErrorState error={error} onRetry={reload}/>:filtered.length?<div className="report-grid">{filtered.map(r=><ReportCard key={r.id} report={r}/>)}</div>:<Empty title={query?'No matching reports':'No reports yet'} body={query?'Try another product or category name.':'Start a research run to publish your first comparison.'} action={!query&&<Link to="/" className="btn btn-primary btn-small">Start a run</Link>}/>}</>}
 function ReportCard({report}){const m=report.matrix||{},a=m.a||{},b=m.b||{};return <Link className="report-card panel" to={`/app/reports/${report.id}`}><div className="report-card-top"><span className="tiny-label">{m.category||'SOFTWARE'}</span><Badge status={report.status}/></div><div className="report-pair"><div className="mini-product mini-a">{initials(a.name)}</div><span className="mini-vs">vs</span><div className="mini-product mini-b">{initials(b.name)}</div></div><h3>{a.name||'Product A'} <span>vs</span> {b.name||'Product B'}</h3><p>{new Date(report.created_at).toLocaleDateString([], {year:'numeric',month:'short',day:'numeric'})} <span>·</span> {m.rows?.length||0} comparison dimensions</p><span className="inline-link">Open report <ArrowRight size={15}/></span></Link>}

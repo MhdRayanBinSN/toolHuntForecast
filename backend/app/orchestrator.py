@@ -2,7 +2,7 @@ import asyncio, json, logging, random, time
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlsplit
 from sqlmodel import Session, select
-from .db import engine, Run, StageLog, Candidate, Page, Fact, Screenshot, Comparison, Category, utcnow
+from .db import engine, Run, StageLog, Candidate, CategoryCandidate, Page, Fact, Screenshot, Comparison, Category, utcnow
 from .sources.producthunt import fetch as fetch_producthunt
 from .services.fetcher import fetch
 from .services.safety import canonicalize
@@ -105,9 +105,15 @@ async def run_pipeline(run_id: int):
     start=time.monotonic(); current_stage="collect"; stage_started=start
     try:
         with Session(engine) as s:
-            run=s.get(Run,run_id); run.status="running"; run.started_at=utcnow(); run.finished_at=None; run.error=""; run.message="Collecting product candidates"; category=run.category; s.add(run); s.commit()
+            run=s.get(Run,run_id); run.status="running"; run.started_at=utcnow(); run.finished_at=None; run.error=""; run.message="Collecting product candidates"; category=run.category; category_config=s.get(Category,run.category_id) if run.category_id else s.exec(select(Category).where(Category.name==category)).first(); category_id=category_config.id if category_config else None; db_keywords=json.loads(category_config.keywords_json or "[]") if category_config else []; topic_slugs=json.loads(category_config.ph_topic_slugs_json or "[]") if category_config else []; s.add(run); s.commit()
+        configured=get_settings().topics.get("category_keywords",{}) or {}
+        configured_keywords=next((values for name,values in configured.items() if " ".join(name.casefold().split())==" ".join(category.casefold().split())),[])
+        category_keywords=list(dict.fromkeys([*db_keywords,*configured_keywords]))
+        configured_topics=get_settings().topics.get("category_topic_slugs",{}) or {}
+        mapped_topics=next((values for name,values in configured_topics.items() if " ".join(name.casefold().split())==" ".join(category.casefold().split())),[])
+        topic_slugs=list(dict.fromkeys([*topic_slugs,*mapped_topics]))
         stage_started=_begin_stage(run_id,"collect","Collecting product candidates")
-        raw=await fetch_producthunt(category)
+        raw=await fetch_producthunt(category,keywords=category_keywords,topic_slugs=topic_slugs)
         candidates=[]
         with Session(engine) as s:
             for item in raw:
@@ -118,14 +124,18 @@ async def run_pipeline(run_id: int):
                 if c.id is not None and c.id in candidates: continue
                 c.name=item["name"] or domain; c.url=url; c.tagline=item.get("tagline",""); c.description=item.get("description",""); c.ph_votes=item.get("votes",0); c.sources_json=json.dumps([item.get("source","Product Hunt")]); c.status="new"
                 s.add(c); s.commit(); s.refresh(c); candidates.append(c.id)
-        _stage(run_id,"collect","ok",int((time.monotonic()-start)*1000),{"count":len(candidates)})
-        if len(candidates)<2: raise RuntimeError("Fewer than two candidates were discovered. Add a Product Hunt API token or configure another discovery source, then start a new run.")
+                if category_id and not s.exec(select(CategoryCandidate).where(CategoryCandidate.category_id==category_id,CategoryCandidate.candidate_id==c.id)).first():
+                    s.add(CategoryCandidate(category_id=category_id,candidate_id=c.id)); s.commit()
+        _stage(run_id,"collect","ok",int((time.monotonic()-start)*1000),{"count":len(candidates),"candidate_ids":candidates})
+        if len(candidates)<2:
+            reason="Product Hunt token is missing." if not get_settings().producthunt_token else "Fewer than two relevant products matched this category. Add category keywords or broaden the topic, then retry."
+            raise RuntimeError(reason)
         current_stage="score"; stage_started=_begin_stage(run_id,"score","Checking and scoring candidates"); start=stage_started; scored=[]
         with Session(engine) as s:
             for cid in candidates:
                 c=s.get(Candidate,cid)
                 status,_,_=await fetch(c.url)
-                scores=candidate_score({"name":c.name,"tagline":c.tagline,"description":c.description,"votes":c.ph_votes,"source":c.sources_json},category,liveness=1.0 if status==200 else 0.0)
+                scores=candidate_score({"name":c.name,"tagline":c.tagline,"description":c.description,"votes":c.ph_votes,"source":c.sources_json},category,liveness=1.0 if status==200 else 0.0,keywords=category_keywords)
                 c.scores_json=json.dumps(scores); c.status="new" if status==200 and scores["category_fit"]>=.30 else "rejected"; s.add(c)
                 if status==200 and scores["category_fit"]>=.30: scored.append((scores["total"],cid))
             s.commit()

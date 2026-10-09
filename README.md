@@ -19,9 +19,9 @@ data/                      Local database, page cache and screenshots
 3. Copy `.env.example` to `.env`. Set `PRODUCTHUNT_TOKEN` to enable Product Hunt discovery.
 4. Install the Playwright browser with `playwright install chromium` if screenshot capture is needed.
 5. In `frontend/`, run `npm install` and `npm run build`.
-6. Start the app from the repository root with `uvicorn backend.app.main:app --reload` and open `http://127.0.0.1:8000`.
+6. Start the app from the repository root with `uvicorn backend.app.main:app --reload --port 8001` and open `http://127.0.0.1:8001`.
 
-For React development with hot reload, run `npm run dev` in `frontend/` and `uvicorn backend.app.main:app --reload` from the repository root in a second terminal. Vite proxies API requests to FastAPI. React lives under `/app/` for views that would otherwise overlap with the documented REST API paths; the overview is `/`.
+For React development with hot reload, run `npm run dev` in `frontend/` and `uvicorn backend.app.main:app --reload --port 8001` from the repository root in a second terminal. Vite proxies API requests to FastAPI on port 8001 by default; set `VITE_API_PROXY_TARGET` if the backend uses another URL. React lives under `/app/` for views that would otherwise overlap with the documented REST API paths; the overview is `/`.
 
 The database and screenshots are stored in `data/`. Without the Product Hunt token, discovery returns no products and a run explains that it needs a discovery source. Reports are generated from retrieved page evidence; the deterministic report path works without an LLM key.
 
@@ -44,8 +44,8 @@ Start with `cp .env.example .env`, then add your Product Hunt token. Keep `.env`
 - `POST /runs` with `{"category":"...","mode":"fast"}` starts a background run.
 - `GET /runs`, `GET /runs/{id}` provide progress and stage details.
 - `GET /reports`, `GET /reports/{id}?format=md` provide report data and Markdown.
-- `GET/POST /categories`, `PATCH /categories/{id}` manage categories.
+- `GET/POST /categories`, `PATCH /categories/{id}`, and `DELETE /categories/{id}` manage categories. Deleting a category also deletes its runs, reports, and unshared product research data.
 - `GET /candidates` lists collected candidates and scores.
 
-For scheduled runs, configure cron to POST to `/runs`.
+Daily runs are scheduled by the backend for every active category. The default is `06:00 UTC`; set `SCHEDULE_CRON` to a five-field cron expression or set `SCHEDULE_ENABLED=false` to pause the scheduler. `GET /schedule` reports its status, active category count, and next run time. Paused categories are skipped.
 # toolHuntForecast

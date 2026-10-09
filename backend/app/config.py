@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     llm_max_calls_per_run: int = 3
     user_agent: str = "ProductResearchBot/1.0"
     database_url: str = "sqlite:///data/app.db"
+    schedule_enabled: bool = True
     schedule_cron: str = "0 6 * * *"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 

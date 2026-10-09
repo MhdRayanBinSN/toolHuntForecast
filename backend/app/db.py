@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from sqlmodel import SQLModel, Field, Session, create_engine, select
+from sqlalchemy import UniqueConstraint
 from .config import get_settings
 
 def utcnow(): return datetime.now(timezone.utc)
@@ -26,6 +27,12 @@ class Candidate(SQLModel, table=True):
     first_seen: datetime = Field(default_factory=utcnow)
     scores_json: str = "{}"
     status: str = "new"
+
+class CategoryCandidate(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("category_id", "candidate_id", name="uq_category_candidate"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    category_id: int = Field(index=True, foreign_key="category.id")
+    candidate_id: int = Field(index=True, foreign_key="candidate.id")
 
 class URLSnapshot(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -134,4 +141,3 @@ def init_db():
             s.add(Category(name=get_settings().category, keywords_json="[]", active=True)); s.commit()
 def session(): return Session(engine)
 def dump(obj): return json.loads(obj) if obj else {}
-

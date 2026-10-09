@@ -1,8 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const apiTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8001';
+const apiPaths = ['/runs', '/reports', '/categories', '/candidates', '/health', '/screenshots'];
+
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5173, proxy: { '/runs': 'http://127.0.0.1:8000', '/reports': 'http://127.0.0.1:8000', '/categories': 'http://127.0.0.1:8000', '/candidates': 'http://127.0.0.1:8000', '/health': 'http://127.0.0.1:8000', '/screenshots': 'http://127.0.0.1:8000' } },
+  server: { port: 5173, proxy: Object.fromEntries(apiPaths.map(path => [path, { target: apiTarget }])) },
   build: { outDir: 'dist', emptyOutDir: true }
 });
