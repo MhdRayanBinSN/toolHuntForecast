@@ -1,7 +1,35 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowRight, ExternalLink, FileText, Plus, Search, Settings2 } from 'lucide-react';
-import { createCategory, getCandidates, getCategories, updateCategory } from './api.js';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { ArrowRight, ChevronLeft, ExternalLink, FileText, Layers, Mail, Plus, Search, Settings2, ShieldCheck, Users, Workflow } from 'lucide-react';
+import { createCategory, getCandidates, getCategories, getReports, updateCategory } from './api.js';
+
+const categoryIcon = name => /email|cold/i.test(name)?Mail:/crm|pipeline/i.test(name)?Layers:/verif|security/i.test(name)?ShieldCheck:/lead|prospect/i.test(name)?Users:Workflow;
+const categoryDescription = name => /cold email/i.test(name)?'Compare cold email platforms, sending workflows, and deliverability evidence.':/crm/i.test(name)?'Compare customer relationship and pipeline tools side by side.':/verif/i.test(name)?'Compare email verification and data-quality capabilities.':/lead/i.test(name)?'Compare lead discovery, prospecting, and enrichment tools.':`Compare ${name.toLowerCase()} products using the evidence gathered in each run.`;
+
+export function ComparisonHub(){
+  const [searchParams,setSearchParams]=useSearchParams();
+  const selected=searchParams.get('category')||'';
+  const [state,setState]=useState({loading:true,error:'',reports:[],categories:[]});
+  useEffect(()=>{let alive=true;Promise.all([getReports(),getCategories()]).then(([reports,categories])=>{if(alive)setState({loading:false,error:'',reports,categories})}).catch(error=>{if(alive)setState(s=>({...s,loading:false,error:error.message}))});return()=>{alive=false}},[]);
+  const categoryRows=useMemo(()=>{
+    const names=new Map();
+    for(const c of state.categories)names.set(c.name.trim().toLowerCase(),c.name);
+    for(const r of state.reports){const name=r.matrix?.category?.trim();if(name)names.set(name.toLowerCase(),name)}
+    return [...names.values()].map(name=>({name,reports:state.reports.filter(r=>(r.matrix?.category||'').toLowerCase()===name.toLowerCase())})).sort((a,b)=>a.name.localeCompare(b.name));
+  },[state.categories,state.reports]);
+  const current=categoryRows.find(c=>c.name.toLowerCase()===selected.toLowerCase());
+  return <>
+    <header className="page-heading"><div><p className="eyebrow">COMPARISON LIBRARY</p><h1>{current?current.name:'Compare products'}</h1><p className="page-description">{current?categoryDescription(current.name):'Browse completed product comparisons by research category.'}</p></div></header>
+    {state.error?<ErrorState error={state.error}/>:state.loading?<Loading/>:current?<>
+      <button className="btn btn-quiet btn-small comparison-back" onClick={()=>setSearchParams({})}><ChevronLeft size={16}/> All categories</button>
+      <section className="comparison-category-grid"><div className="comparison-category-head"><div><span className="eyebrow">{current.name.toUpperCase()}</span><h2>{current.reports.length} {current.reports.length===1?'comparison':'comparisons'}</h2></div><span className="muted-cell">Completed reports</span></div>
+        {current.reports.length?<div className="comparison-list">{current.reports.map(report=>{const a=report.matrix?.a||{},b=report.matrix?.b||{};return <Link className="comparison-library-row panel" key={report.id} to={`/app/reports/${report.id}`}><span className="comparison-library-pair"><strong>{a.name||'Product A'}</strong><span>vs</span><strong>{b.name||'Product B'}</strong></span><span className="comparison-library-meta">{new Date(report.created_at).toLocaleDateString()} <b className={`badge badge-${report.status}`}>{report.status}</b></span><ArrowRight size={17}/></Link>})}</div>:<Empty title="No comparisons yet" body="Complete a research run in this category and its report will appear here."/>}
+      </section>
+    </>:<section className="comparison-category-grid"><div className="comparison-category-head"><div><span className="eyebrow">RESEARCH CATEGORIES</span><h2>Find a comparison</h2></div><span className="muted-cell">{categoryRows.length} categories</span></div>
+      {categoryRows.length?<div className="comparison-category-cards">{categoryRows.map(category=>{const Icon=categoryIcon(category.name);return <button className="comparison-category-card" key={category.name} onClick={()=>setSearchParams({category:category.name})}><Icon size={20}/><strong>{category.name}</strong><p>{categoryDescription(category.name)}</p><span>{category.reports.length} {category.reports.length===1?'comparison':'comparisons'} <ArrowRight size={14}/></span></button>})}</div>:<Empty title="No categories yet" body="Add a category in Research Setup to organize future comparisons."/>}
+    </section>}
+  </>;
+}
 
 export function Categories({ notify }) {
   const [rows,setRows]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[show,setShow]=useState(false),[saving,setSaving]=useState(false),[name,setName]=useState(''),[keywords,setKeywords]=useState('');

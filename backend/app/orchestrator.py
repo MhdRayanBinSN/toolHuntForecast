@@ -59,17 +59,54 @@ async def _capture_logo(page, path, home_url):
 
 def _stage(run_id, stage, state, duration=0, output=None, error=""):
     with Session(engine) as s:
-        s.add(StageLog(run_id=run_id,stage=stage,status=state,duration_ms=duration,output_json=json.dumps(output or {}),error=error)); s.commit()
+        row=s.exec(select(StageLog).where(StageLog.run_id==run_id,StageLog.stage==stage).order_by(StageLog.id.desc())).first()
+        if row and row.status=="running":
+            row.status=state; row.duration_ms=duration; row.output_json=json.dumps(output or {}); row.error=error; s.add(row)
+        else:
+            s.add(StageLog(run_id=run_id,stage=stage,status=state,duration_ms=duration,output_json=json.dumps(output or {}),error=error))
+        s.commit()
+
+def _begin_stage(run_id, stage, message):
+    _stage(run_id,stage,"running")
+    with Session(engine) as s:
+        run=s.get(Run,run_id)
+        if run: run.message=message; s.add(run); s.commit()
+    return time.monotonic()
+
+def _store_research_page(candidate_id, url, topic, status, method, page, score):
+    saved=[]
+    with Session(engine) as s:
+        record=Page(candidate_id=candidate_id,url=url,topic=topic,score=score,status_code=status,method=method,text_hash=page["hash"],text=page["text"])
+        s.add(record); s.commit(); s.refresh(record)
+        for fact in page["facts"]:
+            if fact["quote"] not in page["text"]: continue
+            row=Fact(candidate_id=candidate_id,field=fact["field"],value=fact["value"],source_url=fact["source_url"],quote=fact["quote"],kind=fact["kind"],confidence=.55)
+            s.add(row); s.commit(); s.refresh(row)
+            saved.append({"id":row.id,"field":row.field,"value":row.value,"source_url":row.source_url,"quote":row.quote,"kind":row.kind,"confidence":row.confidence,"topic":topic})
+    return saved
+
+_LINK_TOPICS={
+    "pricing":("pricing","price","plans","billing","cost"),
+    "features":("features","capabilities","product"),
+    "integrations":("integration","integrations","api","webhook","connect"),
+    "security":("security","privacy","trust","compliance"),
+    "workflow":("how-it-works","how it works","workflow","getting-started","demo","docs")
+}
+def _link_topic(url, anchor_text=""):
+    text=(url+" "+anchor_text).lower()
+    for topic,terms in _LINK_TOPICS.items():
+        if any(term in text for term in terms): return topic
+    return "page"
 
 def _load(run_id):
     with Session(engine) as s: return s.get(Run,run_id)
 
 async def run_pipeline(run_id: int):
-    start=time.monotonic()
+    start=time.monotonic(); current_stage="collect"; stage_started=start
     try:
         with Session(engine) as s:
-            run=s.get(Run,run_id); run.status="running"; run.started_at=utcnow(); run.message="Collecting product candidates"; category=run.category; s.add(run); s.commit()
-        _stage(run_id,"collect","running")
+            run=s.get(Run,run_id); run.status="running"; run.started_at=utcnow(); run.finished_at=None; run.error=""; run.message="Collecting product candidates"; category=run.category; s.add(run); s.commit()
+        stage_started=_begin_stage(run_id,"collect","Collecting product candidates")
         raw=await fetch_producthunt(category)
         candidates=[]
         with Session(engine) as s:
@@ -83,7 +120,7 @@ async def run_pipeline(run_id: int):
                 s.add(c); s.commit(); s.refresh(c); candidates.append(c.id)
         _stage(run_id,"collect","ok",int((time.monotonic()-start)*1000),{"count":len(candidates)})
         if len(candidates)<2: raise RuntimeError("Fewer than two candidates were discovered. Add a Product Hunt API token or configure another discovery source, then start a new run.")
-        start=time.monotonic(); scored=[]
+        current_stage="score"; stage_started=_begin_stage(run_id,"score","Checking and scoring candidates"); start=stage_started; scored=[]
         with Session(engine) as s:
             for cid in candidates:
                 c=s.get(Candidate,cid)
@@ -94,12 +131,14 @@ async def run_pipeline(run_id: int):
             s.commit()
         _stage(run_id,"score","ok",int((time.monotonic()-start)*1000),{"scored":len(scored)})
         if len(scored)<2: raise RuntimeError("Fewer than two live, category-matched candidates were found. Try a broader category or configure more discovery sources.")
+        current_stage="select"; stage_started=_begin_stage(run_id,"select","Selecting products for comparison")
         scored.sort(reverse=True); chosen=scored[:2]
         with Session(engine) as s:
             run=s.get(Run,run_id); run.decision_json=json.dumps({"chosen":chosen,"backups":[x[1] for x in scored[2:]]}); s.add(run); s.commit()
         _stage(run_id,"select","ok",output={"chosen":chosen,"backups":[x[1] for x in scored[2:]]})
         researched=[]
         for label,(_,cid) in zip(("A","B"),chosen):
+            current_stage=f"research_{label.lower()}"; stage_started=_begin_stage(run_id,current_stage,f"Researching Product {label}")
             with Session(engine) as s:
                 c=s.get(Candidate,cid)
                 if not c: raise RuntimeError(f"Selected product {cid} is no longer available.")
@@ -108,23 +147,29 @@ async def run_pipeline(run_id: int):
             t=time.monotonic(); status,html,method=await fetch(candidate["url"])
             if status!=200 or not html: raise RuntimeError(f"Product {label} site could not be fetched (HTTP {status}).")
             page=extract(html,candidate["url"])
-            with Session(engine) as s:
-                p=Page(candidate_id=cid,url=candidate["url"],topic="home",score=1,status_code=status,method=method,text_hash=page["hash"],text=page["text"]); s.add(p); s.commit(); s.refresh(p)
-                for fact in page["facts"]:
-                    if fact["quote"] in page["text"]: s.add(Fact(candidate_id=cid,field=fact["field"],value=fact["value"],source_url=fact["source_url"],quote=fact["quote"],kind=fact["kind"],confidence=.55))
-                s.commit()
-            links=[]
+            research_facts=_store_research_page(cid,candidate["url"],"home",status,method,page,1.0)
+            links=[]; seen_urls={candidate["url"]}
             from selectolax.lexbor import LexborHTMLParser as HTMLParser
             tree=HTMLParser(html)
             for a in tree.css("a[href]"):
                 href=urljoin(candidate["url"],a.attributes.get("href",""))
                 try: d,norm=canonicalize(href)
                 except ValueError: continue
-                if d==candidate["domain"] and norm not in links: links.append(norm)
-                if len(links)>=get_settings().max_pages_per_product: break
-            researched.append({"id":cid,"candidate":candidate,"home":page,"links":links or [candidate["url"]]})
-            _stage(run_id,f"research_{label.lower()}","ok",int((time.monotonic()-t)*1000),{"url":candidate["url"],"links":len(links),"facts":len(page["facts"])})
-        t=time.monotonic(); shot_count=0
+                if d!=candidate["domain"] or norm in seen_urls: continue
+                seen_urls.add(norm); links.append({"url":norm,"topic":_link_topic(norm,a.text(strip=True))})
+            topic_order={name:index for index,name in enumerate(("pricing","features","integrations","security","workflow","page"))}
+            links.sort(key=lambda item:(topic_order.get(item["topic"],99),len(item["url"])))
+            pages=[{"url":candidate["url"],"topic":"home"}]
+            max_extra=max(0,get_settings().max_pages_per_product-1)
+            for target in links[:max_extra]:
+                page_status,sub_html,sub_method=await fetch(target["url"])
+                if page_status!=200 or not sub_html: continue
+                sub_page=extract(sub_html,target["url"])
+                research_facts.extend(_store_research_page(cid,target["url"],target["topic"],page_status,sub_method,sub_page,.8))
+                pages.append({"url":target["url"],"topic":target["topic"]})
+            researched.append({"id":cid,"candidate":candidate,"home":page,"facts":research_facts,"pages":pages})
+            _stage(run_id,f"research_{label.lower()}","ok",int((time.monotonic()-t)*1000),{"url":candidate["url"],"pages_reviewed":pages,"facts":len(research_facts)})
+        current_stage="screenshots"; stage_started=_begin_stage(run_id,"screenshots","Capturing homepage and logo screenshots"); t=stage_started; shot_count=0
         try:
             from playwright.async_api import async_playwright
             shots_root=__import__('pathlib').Path("data/screenshots"); shots_root.mkdir(parents=True,exist_ok=True)
@@ -165,17 +210,20 @@ async def run_pipeline(run_id: int):
         required_shots=CAPTURES_PER_PRODUCT*len(researched)
         screenshots_complete=shot_count==required_shots
         _stage(run_id,"screenshots","ok" if screenshots_complete else "partial",int((time.monotonic()-t)*1000),{"count":shot_count,"required":required_shots,"per_product":["homepage","logo/icon"]})
+        current_stage="compare"; stage_started=_begin_stage(run_id,"compare","Comparing verified product details")
         a,b=researched[0],researched[1]
         with Session(engine) as s:
-            af=s.exec(select(Fact).where(Fact.candidate_id==a["id"])).all(); bf=s.exec(select(Fact).where(Fact.candidate_id==b["id"])).all()
+            af=a["facts"]; bf=b["facts"]
             rows=[]
-            for field in ["pricing","features"]:
-                av=next((f.value for f in af if f.field==field),"not publicly found"); bv=next((f.value for f in bf if f.field==field),"not publicly found")
-                rows.append({"dimension":field,"a":av,"b":bv,"verdict":"unknown" if av=="not publicly found" or bv=="not publicly found" else "not_comparable","facts_a":[f"F{f.id}" for f in af if f.field==field],"facts_b":[f"F{f.id}" for f in bf if f.field==field]})
-            matrix={"category":category,"a":{"id":a["id"],"name":a["candidate"]["name"],"url":a["candidate"]["url"],"description":a["home"]["description"]},"b":{"id":b["id"],"name":b["candidate"]["name"],"url":b["candidate"]["url"],"description":b["home"]["description"]},"rows":rows,"coverage":{"a":min(1,len(af)/4),"b":min(1,len(bf)/4)},"facts":[{"id":f"F{f.id}","product":"A" if f.candidate_id==a["id"] else "B","field":f.field,"value":f.value,"source_url":f.source_url,"quote":f.quote,"kind":f.kind} for f in af+bf]}
+            for field in ["pricing","features","integrations","security","limits","limitations"]:
+                av=next((f["value"] for f in af if f["field"]==field),"not publicly found"); bv=next((f["value"] for f in bf if f["field"]==field),"not publicly found")
+                rows.append({"dimension":field,"a":av,"b":bv,"verdict":"unknown" if av=="not publicly found" or bv=="not publicly found" else "not_comparable","facts_a":[f"F{f['id']}" for f in af if f["field"]==field],"facts_b":[f"F{f['id']}" for f in bf if f["field"]==field]})
+            matrix={"category":category,"a":{"id":a["id"],"name":a["candidate"]["name"],"url":a["candidate"]["url"],"description":a["home"]["description"]},"b":{"id":b["id"],"name":b["candidate"]["name"],"url":b["candidate"]["url"],"description":b["home"]["description"]},"rows":rows,"coverage":{"a":min(1,len(af)/6),"b":min(1,len(bf)/6)},"sources":[{"product":"A","url":p["url"],"topic":p["topic"]} for p in a["pages"]]+[{"product":"B","url":p["url"],"topic":p["topic"]} for p in b["pages"]],"facts":[{"id":f"F{f['id']}","product":label,"field":f["field"],"value":f["value"],"source_url":f["source_url"],"quote":f["quote"],"kind":f["kind"]} for label,items in (("A",af),("B",bf)) for f in items]}
             _stage(run_id,"compare","ok",output={"rows":len(rows),"facts":len(af)+len(bf)})
+            current_stage="write"; stage_started=_begin_stage(run_id,"write","Writing comparison report")
             report=render_markdown(matrix)
             _stage(run_id,"write","ok",output={"method":"deterministic_template"})
+            current_stage="render"; stage_started=_begin_stage(run_id,"render","Rendering comparison report")
             html_report=render_html_report(matrix,report)
             comp=Comparison(run_id=run_id,a_id=a["id"],b_id=b["id"],matrix_json=json.dumps(matrix),markdown=report,html=html_report,coverage_json=json.dumps(matrix["coverage"]),status="partial" if not screenshots_complete else "completed")
             s.add(comp)
@@ -188,19 +236,59 @@ async def run_pipeline(run_id: int):
             run=s.get(Run,run_id); run.status="partial" if not screenshots_complete else "completed"; run.finished_at=utcnow(); run.message="Report ready"; s.add(run); s.commit()
     except Exception as exc:
         log.exception("Run %s failed",run_id)
+        reason=str(exc) or exc.__class__.__name__
+        _stage(run_id,current_stage,"failed",int((time.monotonic()-stage_started)*1000),error=reason)
         with Session(engine) as s:
             run=s.get(Run,run_id)
-            if run: run.status="failed"; run.error=str(exc); run.message=str(exc); run.finished_at=utcnow(); s.add(run); s.commit()
-        _stage(run_id,"pipeline","failed",error=str(exc))
+            if run: run.status="failed"; run.error=reason; run.message=f"Failed during {current_stage.replace('_',' ')}: {reason}"; run.finished_at=utcnow(); s.add(run); s.commit()
 
 def render_markdown(m):
     a,b=m["a"],m["b"]
-    lines=[f"# {a['name']} vs {b['name']} for {m['category']}","","## TL;DR","- The report compares only details extracted from the public pages linked in Sources.","- Values not found during this run are labeled explicitly.","- Coverage is shown below for each product.","","## At a glance","| Dimension | Product A | Product B |","|---|---|---|"]
-    for r in m["rows"]:
-        av=r["a"]+((" "+" ".join(f"[{fid}]" for fid in r.get("facts_a",[]))) if r.get("facts_a") else "")
-        bv=r["b"]+((" "+" ".join(f"[{fid}]" for fid in r.get("facts_b",[]))) if r.get("facts_b") else "")
-        lines.append(f"| {r['dimension'].replace('_',' ').title()} | {av} | {bv} |")
-    lines += ["","## Features","Public page feature evidence is summarized in the table above.","","## Pricing","Pricing was not publicly found unless a value is shown above.","","## Integrations","Integration data was not publicly found in the pages reviewed.","","## Strengths and limitations",f"- **{a['name']}:** No verified strengths or limitations were extracted from the pages reviewed.",f"- **{b['name']}:** No verified strengths or limitations were extracted from the pages reviewed.","","## Who may prefer which","The available public evidence is not sufficient to recommend one product over the other.","","## Data coverage and confidence",f"Coverage: Product A {m['coverage']['a']:.0%}; Product B {m['coverage']['b']:.0%}. Findings are limited to retrieved public pages.","","## Sources",f"- [{a['name']}]({a['url']})",f"- [{b['name']}]({b['url']})"]
+    rows=m.get("rows",[]); facts=m.get("facts",[])
+    by_product={"A":[f for f in facts if f.get("product")=="A"],"B":[f for f in facts if f.get("product")=="B"]}
+    source_pages=m.get("sources") or [{"product":"A","topic":"home","url":a["url"]},{"product":"B","topic":"home","url":b["url"]}]
+    def clean(value): return value if value and "not publicly found" not in value.lower() else "Not found in the pages reviewed"
+    def ref_id(f):
+        value=str(f.get("id", ""))
+        return value if value.startswith("F") else f"F{value}"
+    def row_value(name,key):
+        row=next((x for x in rows if x.get("dimension")==name),None)
+        return clean(row.get(key)) if row else "Not found in the pages reviewed"
+    lines=[f"# {a['name']} vs {b['name']} for {m['category']}","",f"Generated from public pages retrieved for this run.","","## Quick decision verdict","| Decision category | Evidence-based finding |","|---|---|",
+      f"| Pricing evidence | {a['name']}: {row_value('pricing','a')}; {b['name']}: {row_value('pricing','b')} |",
+      f"| Feature evidence | {a['name']}: {row_value('features','a')}; {b['name']}: {row_value('features','b')} |",
+      "| Overall recommendation | No winner is assigned because the available public evidence is not enough to verify a complete side-by-side fit. |",
+      "","## At a glance","| Attribute | Product A | Product B |","|---|---|---|",
+      f"| Product | {a['name']} | {b['name']} |",f"| Primary purpose | {a.get('description') or 'Not found in the pages reviewed'} | {b.get('description') or 'Not found in the pages reviewed'} |",
+      f"| Starting price evidence | {row_value('pricing','a')} | {row_value('pricing','b')} |",f"| Feature evidence | {row_value('features','a')} | {row_value('features','b')} |",
+      "","## Feature-by-feature matrix","| Capability | Why it matters | Product A | Product B | Finding |","|---|---|---|---|---|"]
+    for row in rows:
+        why="Budget and plan limits" if row["dimension"]=="pricing" else "Publicly described product capability"
+        finding="Not enough matched evidence" if row.get("verdict")=="unknown" else "See evidence"
+        av=clean(row.get("a")); bv=clean(row.get("b"))
+        if row.get("facts_a"): av += " " + " ".join(f"[{x}]" for x in row["facts_a"])
+        if row.get("facts_b"): bv += " " + " ".join(f"[{x}]" for x in row["facts_b"])
+        lines.append(f"| {row['dimension'].replace('_',' ').title()} | {why} | {av} | {bv} | {finding} |")
+    lines += ["","## Technical deep dives"]
+    for label,product in (("A",a),("B",b)):
+        lines += [f"### {product['name']}",product.get("description") or "No product summary was found in the pages reviewed."]
+        product_facts=by_product[label]
+        if product_facts:
+            lines.append("Verified details:")
+            lines.extend(f"- **{f.get('field','Detail').replace('_',' ').title()}:** {f.get('quote') or f.get('value','')} [{ref_id(f)}]" for f in product_facts)
+        else: lines.append("No additional technical facts were verified in the pages reviewed.")
+    lines += ["","## Pricing and total cost of ownership",f"- **{a['name']}:** {row_value('pricing','a')}",f"- **{b['name']}:** {row_value('pricing','b')}","","Comparable total cost is unavailable because equivalent plans, user counts, usage levels, and add-on costs were not established by the retrieved evidence.","","## Which product fits your use case?","The retrieved pages provide product summaries and limited fact excerpts, but do not establish enough requirements or matched plan limits to rank either product for a specific team. Confirm use-case fit with the official sources.","","## Where each product falls short"]
+    for label,product in (("A",a),("B",b)):
+        limits=[f for f in by_product[label] if f.get("field") in ("limitations","cons")]
+        lines.append(f"- **{product['name']}:** " + ("; ".join(f.get("quote") or f.get("value","") for f in limits) if limits else "No independently verified limitation was extracted in this run; this does not mean the product has no limitations."))
+    lines += ["","## The switching playbook","Before switching, confirm data export, migration support, plan limits, integrations, and contract terms directly with each vendor. Migration documentation was not established by this run.","","## Frequently asked questions",
+      f"### Which product is cheaper?\nThe run did not find comparable pricing for both products. Check equivalent billing periods, included limits, and add-on costs.",
+      f"### Which product has more features?\n{a['name']}: {row_value('features','a')}. {b['name']}: {row_value('features','b')}. These excerpts are not a complete feature inventory.",
+      "### Which one should I choose?\nThere is not enough verified evidence in this report to name an overall winner. Compare the cited sources against your requirements and confirm missing details with both vendors.",
+      "","## Final verdict and recommendation","No overall winner is assigned. Review the verified evidence, confirm plan and workflow details with both vendors, and make the decision against your team's requirements.",
+      "","## Data coverage and confidence",f"Coverage: Product A {m['coverage']['a']:.0%}; Product B {m['coverage']['b']:.0%}. ‘Not found’ means the crawler did not locate the information in its reviewed pages.","","## Sources and methodology",
+      *[f"- Product {source['product']} · {source['topic']}: [{source['url']}]({source['url']})" for source in source_pages],
+      "","Claims in this report come from public pages retrieved during this run. Missing evidence is stated as unknown rather than inferred. Verify current pricing, plan limits, and product claims with the official sources before purchase."]
     return "\n".join(lines)
 
 def render_html_report(matrix, markdown):

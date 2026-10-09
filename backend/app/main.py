@@ -7,8 +7,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 from .config import get_settings
-from .db import engine, init_db, Category, Run, StageLog, Comparison, Candidate, Screenshot
-from .orchestrator import run_pipeline, STAGES
+from .db import engine, init_db, Category, Run, StageLog, Comparison, Candidate, Screenshot, LLMCall
+from .orchestrator import run_pipeline, render_markdown, STAGES
 
 BACKEND_ROOT=Path(__file__).resolve().parents[1]
 PROJECT_ROOT=BACKEND_ROOT.parent
@@ -21,9 +21,14 @@ def startup(): init_db()
 
 def _json(row): return json.loads(row) if row else {}
 
-def _run_dict(r, logs=None):
+def _run_dict(r, logs=None, llm_calls=None):
     logs=logs or []
-    return {"id":r.id,"category":r.category,"status":r.status,"mode":r.mode,"started_at":r.started_at,"finished_at":r.finished_at,"message":r.message,"error":r.error,"decision":_json(r.decision_json),"stages":[{"stage":x.stage,"status":x.status,"duration_ms":x.duration_ms,"output":_json(x.output_json),"error":x.error,"started_at":x.started_at} for x in logs]}
+    llm_calls=llm_calls or []
+    failed_stage=next((x for x in reversed(logs) if x.status=="failed"),None)
+    tokens_in=sum(call.tokens_in for call in llm_calls)
+    tokens_out=sum(call.tokens_out for call in llm_calls)
+    failure={"stage":failed_stage.stage,"reason":failed_stage.error or r.error} if r.status=="failed" and failed_stage else None
+    return {"id":r.id,"category":r.category,"status":r.status,"mode":r.mode,"started_at":r.started_at,"finished_at":r.finished_at,"message":r.message,"error":r.error if r.status=="failed" else "","failure":failure,"token_usage":{"input_tokens":tokens_in,"output_tokens":tokens_out,"total_tokens":tokens_in+tokens_out,"calls":len(llm_calls)},"decision":_json(r.decision_json),"stages":[{"stage":x.stage,"status":x.status,"duration_ms":x.duration_ms,"output":_json(x.output_json),"error":x.error,"started_at":x.started_at} for x in logs]}
 
 class RunInput(BaseModel):
     category: str|None=None
@@ -49,7 +54,13 @@ def create_run(data:RunInput,background_tasks:BackgroundTasks):
 
 @app.get("/runs")
 def runs(limit:int=50):
-    with Session(engine) as s: return [_run_dict(r,s.exec(select(StageLog).where(StageLog.run_id==r.id)).all()) for r in s.exec(select(Run).order_by(Run.id.desc()).limit(limit)).all()]
+    with Session(engine) as s:
+        result=[]
+        for r in s.exec(select(Run).order_by(Run.id.desc()).limit(limit)).all():
+            logs=s.exec(select(StageLog).where(StageLog.run_id==r.id).order_by(StageLog.id)).all()
+            calls=s.exec(select(LLMCall).where(LLMCall.run_id==r.id)).all()
+            result.append(_run_dict(r,logs,calls))
+        return result
 
 @app.get("/runs/{run_id}")
 def run_detail(run_id:int):
@@ -57,7 +68,8 @@ def run_detail(run_id:int):
         r=s.get(Run,run_id)
         if not r: raise HTTPException(404,"Run not found")
         logs=s.exec(select(StageLog).where(StageLog.run_id==run_id).order_by(StageLog.id)).all()
-        return _run_dict(r,logs)
+        calls=s.exec(select(LLMCall).where(LLMCall.run_id==run_id)).all()
+        return _run_dict(r,logs,calls)
 
 @app.get("/reports")
 def reports(limit:int=50):
@@ -72,8 +84,8 @@ def report(report_id:int,format:str="html"):
         if format=="json":
             matrix=_json(r.matrix_json); ids={matrix.get("a",{}).get("id"),matrix.get("b",{}).get("id")}
             shots=s.exec(select(Screenshot).where(Screenshot.candidate_id.in_(ids),Screenshot.path.contains(f"run-{r.run_id}-"))).all() if None not in ids else []
-            return {"id":r.id,"run_id":r.run_id,"status":r.status,"created_at":r.created_at,"matrix":matrix,"markdown":r.markdown,"screenshots":[{"url":"/screenshots/"+Path(x.path).name,"caption":x.caption,"product":"A" if x.candidate_id==matrix["a"]["id"] else "B"} for x in shots]}
-        if format=="md": return PlainTextResponse(r.markdown,media_type="text/markdown; charset=utf-8")
+            return {"id":r.id,"run_id":r.run_id,"status":r.status,"created_at":r.created_at,"matrix":matrix,"markdown":render_markdown(matrix),"screenshots":[{"url":"/screenshots/"+Path(x.path).name,"caption":x.caption,"product":"A" if x.candidate_id==matrix["a"]["id"] else "B"} for x in shots]}
+        if format=="md": return PlainTextResponse(render_markdown(_json(r.matrix_json)),media_type="text/markdown; charset=utf-8")
         return HTMLResponse(r.html)
 
 @app.get("/candidates")
