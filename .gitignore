@@ -1,0 +1,11 @@
+.env
+.venv/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.py[cod]
+data/*.db
+data/cache/*
+data/screenshots/*
+!data/cache/.gitkeep
+!data/screenshots/.gitkeep

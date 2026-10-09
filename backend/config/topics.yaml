@@ -1,0 +1,9 @@
+page_topics:
+  pricing: "pricing plans, cost per month, free trial, billing"
+  features: "product features, capabilities, what it does"
+  how_it_works: "how it works, workflow, getting started, demo"
+  integrations: "integrations, connect with other tools, API, plugins"
+  trust: "security, customers, case studies, testimonials, compliance"
+required_topics: [pricing, features]
+category_keywords: {}
+directories: []
