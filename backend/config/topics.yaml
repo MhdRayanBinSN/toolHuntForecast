@@ -5,7 +5,7 @@ page_topics:
   integrations: "integrations, connect with other tools, API, plugins"
   trust: "security, customers, case studies, testimonials, compliance"
 required_topics: [pricing, features]
-candidate_check_limit: 12
+candidate_check_limit: 100
 # Category-specific vocabulary for matching broad categories to product descriptions.
 category_keywords:
   crm pipeline:

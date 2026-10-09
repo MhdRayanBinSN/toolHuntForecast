@@ -25,16 +25,16 @@
 3. **Every stage persists its output** so a crashed run resumes from the last finished stage.
 4. **API-first backend.** UI is a thin, swappable layer.
 5. **Every decision is explainable:** numeric scores and source URLs are stored, not just text.
-6. **Fail soft.** A bad page is skipped, a bad product is replaced by a backup, and the worst case is a clearly labelled partial report.
+6. **Fail safely.** A bad page or irrelevant candidate is rejected and replaced by a verified backup. If fewer than two products pass category verification, stop without creating a comparison and explain why.
 7. **Treat all web content as untrusted** (SSRF, prompt injection, malicious pages).
 
 ## 3. System diagram
 
 ```
-   Scheduler (cron)            UI (Jinja2+HTMX or React)
+   Scheduler (cron)            React UI
           \                         /
            v                       v
-                FastAPI  (REST API + HTML pages)
+                FastAPI  (REST API)
                         |
                   Orchestrator  (resumable stage runner)
                         |
@@ -133,15 +133,18 @@ page_topics:
   integrations:  "integrations, connect with other tools, API, plugins"
   trust:         "security, customers, case studies, testimonials, compliance"
 required_topics: [pricing, features]
-category_keywords: {}            # filled per category in the DB; may be auto-expanded
+candidate_check_limit: 100       # maximum discovered homepages inspected per run
+category_keywords: {}            # discovery vocabulary; profile capabilities are the acceptance criteria
 ```
+
+Each confirmed category also stores a reviewed profile: `definition`, `must_have_any`, `adjacent_not_accepted`, `keywords`, and `negative_keywords`. The profile is generated during category setup and reused during runs. A broad or legacy category without at least two usable required capabilities or specific multi-word category phrases fails closed; do not silently treat it as a valid product category.
 
 ## 7. Data model (SQLModel)
 
 | Table | Key columns |
 |---|---|
-| `category` | id, name, keywords_json, ph_topic_slugs_json, active |
-| `candidate` | id, domain (unique), name, url, tagline, description, sources_json, ph_votes, ph_created_at, first_seen, domain_created_at, wayback_first, scores_json, status (`new|selected|covered|rejected`) |
+| `category` | id, name, keywords_json, ph_topic_slugs_json, profile_json, confirmed, validation_status, active |
+| `candidate` | id, domain (unique), name, url, tagline, description, sources_json, ph_votes, ph_created_at, first_seen, domain_created_at, wayback_first, scores_json (signals plus category evidence/reasons), status (`new|selected|covered|rejected`) |
 | `url_snapshot` | source, url, first_seen, last_seen (unique source+url) |
 | `alt_edge` | seed_domain, alt_domain, source, rank (SaaSHub edges) |
 | `run` | id, category_id, status, mode, started_at, finished_at, error |
@@ -178,6 +181,7 @@ query($first:Int!, $after:String, $postedAfter:DateTime, $topic:String) {
 }
 ```
 - Loop over the category's topic slugs, paginate until `hasNextPage` is false or 200 items.
+- Topic and keyword matching is **discovery only**. It deliberately builds a candidate pool and is not proof that a product belongs to the configured category. Do not select a product from Product Hunt text or topic tags alone.
 - Respect rate limits (complexity-based); cache the day's responses; store the rate-limit headers.
 - Terms: commercial use may require contacting Product Hunt. Fine for personal/learning use.
 
@@ -202,42 +206,47 @@ query($first:Int!, $after:String, $postedAfter:DateTime, $topic:String) {
 - Merge candidates across sources: union of `sources`, max votes, earliest launch date.
 - Skip domains with status `covered`.
 
-### 9.2 Signals (each normalized to 0-1)
+### 9.2 Strict category verification (required before scoring/selection)
+
+The discovery filter is permissive so it can collect possible matches. Every shortlisted candidate must then pass an independent gate using text retrieved from its own public homepage through the SSRF-safe, robots-aware fetcher. Extract the title, meta description, headings, and readable body text. Require HTTP 200 and at least 100 characters of readable text.
+
+Use the category's confirmed `must_have_any` phrases as required capabilities. For legacy categories without a profile, use configured multi-word category phrases as a fallback. Match ordered phrases within one sentence (allowing small wording gaps and common singular/plural forms), and ignore a phrase when it is negated nearby (for example, “no cold outreach”). A candidate must have positive homepage evidence for at least **two distinct** required capabilities. Check `adjacent_not_accepted` and `negative_keywords` against the homepage title, meta description, product name, and tagline; reject a positive match.
+
+Store every matched phrase with the exact supporting homepage quote and URL. Save matched and missing capabilities, adjacent/negative matches, the acceptance result, and rejection reasons in the candidate score record. The score-stage log summarizes rejection counts and includes candidate-level examples so a failed run can be inspected in Run Details.
+
+If fewer than two candidates pass, fail the run without selecting a pair or publishing a comparison. Never lower the threshold or force a pair to complete a report. The user should refine or confirm the category profile when evidence is insufficient.
+
+The implemented pipeline checks up to `candidate_check_limit` discovered candidates (default 100, at most five homepage requests concurrently). Discovery metadata matches prioritize the shortlist; homepage verification decides acceptance. Increase the configured limit if the pool is large and the user needs broader coverage.
+
+### 9.3 Signals (each normalized to 0-1)
 | Signal | Definition |
 |---|---|
-| `launch_recency` | `exp(-days_since_launch / 45)` |
-| `domain_age_score` | `exp(-domain_age_days / 365)` (RDAP creation date); 0.5 if unknown |
-| `first_seen_recency` | `exp(-days_since_first_seen / 30)` |
-| `wayback_score` | `exp(-days_since_first_capture / 365)`; 0.5 if unknown |
-| `velocity` | `votes / (hours_since_launch + 2) ** 1.5`, min-max normalized across the pool |
-| `source_count` | `min(n_sources, 3) / 3` |
-| `category_fit` | cosine(embed(category + keywords), embed(name + tagline + description)) |
+| `category_fit` | fraction of confirmed required capability phrases found positively on the candidate's homepage; this is also the primary ordering signal among accepted candidates |
+| `novelty` | currently a neutral placeholder (`0.5`); launch/domain/history signals are planned but are not yet wired into this implementation |
+| `velocity` | Product Hunt votes divided by 100, capped at 1 |
+| `source_count` | currently `1/3` for a Product Hunt candidate; additional sources are not yet wired into discovery |
+| `liveness` | 1 only when the homepage returns HTTP 200 and contains at least 100 characters of readable text; otherwise 0 |
 
-### 9.3 Scores
+### 9.4 Scores
 ```
-novelty = 0.35*launch_recency + 0.25*domain_age_score
-        + 0.20*first_seen_recency + 0.20*wayback_score
-
 total   = 0.30*category_fit + 0.25*novelty + 0.15*velocity
         + 0.15*source_count + 0.15*liveness
 ```
-`liveness` = 1 if the homepage returns 200 with enough text, else 0 (HEAD/GET check). Reject candidates with `category_fit < 0.30` or a failed liveness check.
+Only candidates that pass the strict category gate and liveness check are eligible. Rank them by `category_fit` first, then `total` as the tie-break. The total score alone must never admit a candidate.
 
-Store all signals in `scores_json` for explainability.
+Store the signals and verification evidence in `scores_json` for explainability.
 
 ## 10. Stage 3: Pair selection
 
-1. Take the top K=5 candidates by `total` as seeds.
-2. For each seed, call SaaSHub alternatives; intersect results with the pool (match by canonical domain).
-3. Pair score:
+1. Select only from candidates that passed section 9.2; relevance is the primary ordering signal, with the total score breaking ties.
+2. The current implementation selects the top two qualifying candidates and stores the remaining qualifying candidates as backups. If fewer than two qualify, fail the run and show the score-stage rejection evidence rather than producing an irrelevant comparison.
+3. Planned pairwise comparability enhancement (not currently wired into the run): take the top K=5 verified candidates by `total` as seeds, call SaaSHub alternatives, and intersect results with the pool by canonical domain.
+4. Planned pair score:
    ```
    pair = 0.5*(total_A + total_B) + 0.20*saashub_edge + 0.15*embed_sim(A, B)
    ```
    Require `embed_sim >= 0.50` (comparability).
-4. Hard rules in code: not the same domain or company, neither already covered, optional cooldown on the same sub-niche.
-5. If the top two pairs are within 0.03 of each other, or no pair passes, use the **LLM tie-break prompt** (section 17.1). Otherwise no LLM call.
-6. Keep a ranked backup list. Randomize which product is labelled A.
-7. If fewer than two valid candidates: widen `since` (7 -> 30 -> 90 days), then allow a labelled "new vs established" pairing from SaaSHub.
+5. Planned hard rules: not the same domain or company, neither already covered, optional cooldown on the same sub-niche. Keep the category verification gate mandatory even when pairwise discovery is enabled.
 
 ## 11. Stage 4: Site analysis (per product, parallel)
 

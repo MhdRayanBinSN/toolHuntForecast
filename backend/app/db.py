@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from sqlmodel import SQLModel, Field, Session, create_engine, select
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import UniqueConstraint, inspect
 from .config import get_settings
 
 def utcnow(): return datetime.now(timezone.utc)
@@ -14,6 +14,16 @@ class Category(SQLModel, table=True):
     keywords_json: str = "[]"
     ph_topic_slugs_json: str = "[]"
     active: bool = True
+    profile_json: str = "{}"
+    confirmed: bool = True
+    validation_status: str = "confirmed"
+
+class CategoryValidationCache(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("normalized_name", name="uq_category_validation_name"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    normalized_name: str = Field(index=True)
+    response_json: str = "{}"
+    created_at: datetime = Field(default_factory=utcnow)
 
 class Candidate(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -136,6 +146,11 @@ def _url():
 engine = _url()
 def init_db():
     SQLModel.metadata.create_all(engine)
+    columns={column["name"] for column in inspect(engine).get_columns("category")}
+    with engine.begin() as connection:
+        if "profile_json" not in columns: connection.exec_driver_sql("ALTER TABLE category ADD COLUMN profile_json TEXT NOT NULL DEFAULT '{}'" )
+        if "confirmed" not in columns: connection.exec_driver_sql("ALTER TABLE category ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT 1")
+        if "validation_status" not in columns: connection.exec_driver_sql("ALTER TABLE category ADD COLUMN validation_status VARCHAR NOT NULL DEFAULT 'confirmed'")
     with Session(engine) as s:
         if not s.exec(select(Category)).first():
             s.add(Category(name=get_settings().category, keywords_json="[]", active=True)); s.commit()

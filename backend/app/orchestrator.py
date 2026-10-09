@@ -7,7 +7,7 @@ from .sources.producthunt import fetch as fetch_producthunt
 from .services.fetcher import fetch
 from .services.safety import canonicalize
 from .pipeline.extract import extract
-from .pipeline.scoring import candidate_score
+from .pipeline.scoring import candidate_score, category_verification_rules, verify_category_fit
 from .config import get_settings
 
 log=logging.getLogger(__name__)
@@ -105,10 +105,13 @@ async def run_pipeline(run_id: int):
     start=time.monotonic(); current_stage="collect"; stage_started=start
     try:
         with Session(engine) as s:
-            run=s.get(Run,run_id); run.status="running"; run.started_at=utcnow(); run.finished_at=None; run.error=""; run.message="Collecting product candidates"; category=run.category; category_config=s.get(Category,run.category_id) if run.category_id else s.exec(select(Category).where(Category.name==category)).first(); category_id=category_config.id if category_config else None; db_keywords=json.loads(category_config.keywords_json or "[]") if category_config else []; topic_slugs=json.loads(category_config.ph_topic_slugs_json or "[]") if category_config else []; s.add(run); s.commit()
+            run=s.get(Run,run_id); run.status="running"; run.started_at=utcnow(); run.finished_at=None; run.error=""; run.message="Collecting product candidates"; category=run.category; category_config=s.get(Category,run.category_id) if run.category_id else s.exec(select(Category).where(Category.name==category)).first(); category_id=category_config.id if category_config else None; db_keywords=json.loads(category_config.keywords_json or "[]") if category_config else []; category_profile=json.loads(category_config.profile_json or "{}") if category_config else {}; profile_keywords=category_profile.get("keywords",[]) if isinstance(category_profile,dict) else []; topic_slugs=json.loads(category_config.ph_topic_slugs_json or "[]") if category_config else []; s.add(run); s.commit()
         configured=get_settings().topics.get("category_keywords",{}) or {}
         configured_keywords=next((values for name,values in configured.items() if " ".join(name.casefold().split())==" ".join(category.casefold().split())),[])
-        category_keywords=list(dict.fromkeys([*db_keywords,*configured_keywords]))
+        category_keywords=list(dict.fromkeys([*db_keywords,*configured_keywords,*profile_keywords]))
+        verification_rules=category_verification_rules(category,category_profile,category_keywords)
+        if not verification_rules["ready"]:
+            raise RuntimeError("Strict product matching is unavailable for this category. Add and confirm at least two required capabilities or configure at least two specific category phrases, then retry.")
         configured_topics=get_settings().topics.get("category_topic_slugs",{}) or {}
         mapped_topics=next((values for name,values in configured_topics.items() if " ".join(name.casefold().split())==" ".join(category.casefold().split())),[])
         topic_slugs=list(dict.fromkeys([*topic_slugs,*mapped_topics]))
@@ -130,50 +133,87 @@ async def run_pipeline(run_id: int):
         if len(candidates)<2:
             reason="Product Hunt token is missing." if not get_settings().producthunt_token else "Fewer than two relevant products matched this category. Add category keywords or broaden the topic, then retry."
             raise RuntimeError(reason)
-        current_stage="score"; stage_started=_begin_stage(run_id,"score","Checking and scoring candidates"); start=stage_started; scored=[]; ranked_candidates=[]
+        current_stage="score"; stage_started=_begin_stage(run_id,"score","Checking product homepages against category requirements"); start=stage_started; scored=[]; ranked_candidates=[]
         with Session(engine) as s:
             for cid in candidates:
                 c=s.get(Candidate,cid)
                 if not c: continue
                 details={"name":c.name,"tagline":c.tagline,"description":c.description,"votes":c.ph_votes,"source":c.sources_json}
-                pre_score=candidate_score(details,category,liveness=0.0,keywords=category_keywords)
-                ranked_candidates.append((pre_score["total"],cid,{"url":c.url,"details":details,"pre_score":pre_score}))
-        ranked_candidates.sort(key=lambda item:(item[0],item[1]),reverse=True)
-        try: candidate_check_limit=max(2,int(get_settings().topics.get("candidate_check_limit",12)))
-        except (TypeError,ValueError): candidate_check_limit=12
+                discovery_check=verify_category_fit({**details,"homepage":{"title":c.name,"description":c.tagline,"text":c.description}},verification_rules)
+                ranked_candidates.append((len(discovery_check["matched_capabilities"]),c.ph_votes,cid,{"url":c.url,"details":details}))
+        ranked_candidates.sort(key=lambda item:(item[0],item[1],item[2]),reverse=True)
+        try: candidate_check_limit=max(2,int(get_settings().topics.get("candidate_check_limit",100)))
+        except (TypeError,ValueError): candidate_check_limit=100
         shortlist=ranked_candidates[:candidate_check_limit]
-        async def probe_candidate(url):
-            try: return await fetch(url)
+        homepage_cache={}
+        probe_semaphore=asyncio.Semaphore(5)
+        async def probe_candidate(item):
+            _,_,cid,candidate_info=item
+            try:
+                async with probe_semaphore:
+                    status,html,method=await fetch(candidate_info["url"])
+                page=extract(html,candidate_info["url"]) if status==200 and html else {"title":"","description":"","headings":[],"text":""}
+                details=candidate_info["details"]
+                verification=verify_category_fit({**details,"homepage":page},verification_rules)
+                if status!=200:
+                    verification["accepted"]=False
+                    verification["reasons"].insert(0,f"Homepage could not be retrieved (HTTP {status}).")
+                elif len(page.get("text", "").strip())<100:
+                    verification["accepted"]=False
+                    verification["reasons"].insert(0,"Homepage did not provide enough readable product text to verify its category.")
+                for evidence in verification.get("matched_capabilities",[]): evidence["source_url"]=candidate_info["url"]
+                for evidence in verification.get("adjacent_matches",[]): evidence["source_url"]=candidate_info["url"]
+                for evidence in verification.get("negative_matches",[]): evidence["source_url"]=candidate_info["url"]
+                if status==200 and html:
+                    homepage_cache[cid]=(status,html,method,page)
+                return status,html,method,page,verification
             except Exception as exc:
-                log.info("Candidate site check failed for %s: %s",url,exc)
-                return 0,"","unavailable"
-        site_results=await asyncio.gather(*(probe_candidate(item[2]["url"]) for item in shortlist))
-        for (_,cid,item),(status,_,_) in zip(shortlist,site_results):
-            scores=candidate_score(item["details"],category,liveness=1.0 if status==200 else 0.0,keywords=category_keywords)
+                log.info("Candidate site check failed for %s: %s",candidate_info["url"],exc)
+                return 0,"","unavailable",{"title":"","description":"","headings":[],"text":""},{"accepted":False,"category_fit":0.0,"profile_source":verification_rules["profile_source"],"matched_capabilities":[],"missing_capabilities":verification_rules["required_phrases"],"adjacent_matches":[],"negative_matches":[],"reasons":[f"Homepage check failed ({type(exc).__name__})."]}
+        site_results=await asyncio.gather(*(probe_candidate(item) for item in shortlist))
+        rejection_reasons={}; rejected_examples=[]; live_candidates=0
+        for (_,_,cid,item),(status,_,_,page,verification) in zip(shortlist,site_results):
+            live=bool(status==200 and len(page.get("text", "").strip())>=100)
+            if live: live_candidates+=1
+            scores=candidate_score(item["details"],category,liveness=1.0 if live else 0.0,keywords=category_keywords,category_fit=verification["category_fit"])
+            scores["verification"]={**verification,"category_name":category}
             with Session(engine) as s:
                 c=s.get(Candidate,cid)
                 if c:
-                    c.scores_json=json.dumps(scores); c.status="new" if status==200 and scores["category_fit"]>=.30 else "rejected"; s.add(c); s.commit()
-            if status==200 and scores["category_fit"]>=.30: scored.append((scores["total"],cid))
-        score_output={"candidates_found":len(candidates),"sites_checked":len(shortlist),"site_check_limit":candidate_check_limit,"live_candidates":sum(1 for status,_,_ in site_results if status==200),"category_matched_candidates":len(scored)}
+                    c.scores_json=json.dumps(scores,ensure_ascii=False); c.status="new" if live and verification["accepted"] else "rejected"; s.add(c); s.commit()
+            if live and verification["accepted"]: scored.append((scores["total"],cid,scores["category_fit"]))
+            else:
+                reason=verification["reasons"][0] if verification.get("reasons") else "Homepage did not pass the strict category check."
+                rejection_reasons[reason]=rejection_reasons.get(reason,0)+1
+                if len(rejected_examples)<20:
+                    rejected_examples.append({"candidate":item["details"]["name"],"url":item["url"],"reasons":verification.get("reasons",[]),"matched_capabilities":verification.get("matched_capabilities",[]),"missing_capabilities":verification.get("missing_capabilities",[])})
+        score_output={"candidates_found":len(candidates),"sites_checked":len(shortlist),"site_check_limit":candidate_check_limit,"live_candidates":live_candidates,"verified_candidates":len(scored),"rejected_candidates":len(shortlist)-len(scored),"rejection_reasons":rejection_reasons,"rejected_examples":rejected_examples}
         _stage(run_id,"score","ok",int((time.monotonic()-start)*1000),score_output)
-        if len(scored)<2: raise RuntimeError("Fewer than two live, category-matched candidates were found. Try a broader category or configure more discovery sources.")
+        if len(scored)<2: raise RuntimeError(f"Strict homepage verification found only {len(scored)} category-matched product(s) after checking {len(shortlist)} sites. No comparison was created; review the score-stage rejection reasons, then refine or confirm the category profile.")
         current_stage="select"; stage_started=_begin_stage(run_id,"select","Selecting products for comparison")
-        scored.sort(reverse=True); chosen=scored[:2]
+        # Relevance is the primary ordering signal; popularity and the remaining
+        # quality signals break ties only among candidates that passed the gate.
+        scored.sort(key=lambda item:(item[2],item[0]),reverse=True); chosen=scored[:2]
         with Session(engine) as s:
-            run=s.get(Run,run_id); run.decision_json=json.dumps({"chosen":chosen,"backups":[x[1] for x in scored[2:]]}); s.add(run); s.commit()
-        _stage(run_id,"select","ok",output={"chosen":chosen,"backups":[x[1] for x in scored[2:]]})
+            chosen_for_storage=[[score,cid] for score,cid,_ in chosen]
+            run=s.get(Run,run_id); run.decision_json=json.dumps({"chosen":chosen_for_storage,"backups":[x[1] for x in scored[2:]]}); s.add(run); s.commit()
+        _stage(run_id,"select","ok",output={"chosen":chosen_for_storage,"backups":[x[1] for x in scored[2:]]})
         researched=[]
-        for label,(_,cid) in zip(("A","B"),chosen):
+        for label,(_,cid,_) in zip(("A","B"),chosen):
             current_stage=f"research_{label.lower()}"; stage_started=_begin_stage(run_id,current_stage,f"Researching Product {label}")
             with Session(engine) as s:
                 c=s.get(Candidate,cid)
                 if not c: raise RuntimeError(f"Selected product {cid} is no longer available.")
                 candidate={"id":c.id,"name":c.name,"url":c.url,"domain":c.domain}
                 run=s.get(Run,run_id); run.message=f"Researching Product {label}"; s.add(run); s.commit()
-            t=time.monotonic(); status,html,method=await fetch(candidate["url"])
+            t=time.monotonic()
+            cached_homepage=homepage_cache.get(cid)
+            if cached_homepage:
+                status,html,method=cached_homepage[:3]
+            else:
+                status,html,method=await fetch(candidate["url"])
             if status!=200 or not html: raise RuntimeError(f"Product {label} site could not be fetched (HTTP {status}).")
-            page=extract(html,candidate["url"])
+            page=cached_homepage[3] if cached_homepage else extract(html,candidate["url"])
             research_facts=_store_research_page(cid,candidate["url"],"home",status,method,page,1.0)
             links=[]; seen_urls={candidate["url"]}
             from selectolax.lexbor import LexborHTMLParser as HTMLParser

@@ -21,6 +21,7 @@ export const getReport = (id) => request(`/reports/${id}?format=json`);
 export const getCategories = () => request('/categories');
 export const getCandidates = () => request('/candidates');
 export const startRun = (category, mode = 'fast') => request('/runs', { method: 'POST', body: JSON.stringify({ category, mode }) });
+export const validateCategory = (body) => request('/categories/validate', { method: 'POST', body: JSON.stringify(body) });
 export const createCategory = (body) => request('/categories', { method: 'POST', body: JSON.stringify(body) });
 export const updateCategory = (id, body) => request(`/categories/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
 export const deleteCategory = (id) => request(`/categories/${id}`, { method: 'DELETE' });

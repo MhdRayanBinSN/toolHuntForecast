@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     llm_model_fast: str = ""
     llm_model_strong: str = ""
+    category_validation_model: str = "gemini-3.6-flash"
     llm_fallback_models: str = "[]"
     llm_max_calls_per_run: int = 3
     user_agent: str = "ProductResearchBot/1.0"
