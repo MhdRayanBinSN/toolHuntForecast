@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     category: str = "software tools"
     products_per_day: int = 2
     max_pages_per_product: int = 5
+    min_screenshots: int = 3
     run_mode: str = "fast"
     max_run_minutes: int = 15
     producthunt_token: str = ""

@@ -1,24 +1,43 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ArrowRight, ChevronLeft, ExternalLink, FileText, Layers, Mail, Plus, Search, Settings2, ShieldCheck, Trash2, Users, Workflow } from 'lucide-react';
+import { ArrowRight, ChevronDown, ChevronLeft, ChevronUp, ExternalLink, FileText, Layers, Plus, Search, Settings2, Trash2, Workflow } from 'lucide-react';
 import { createCategory, deleteCategory, getCandidates, getCategories, getReports, updateCategory, validateCategory } from './api.js';
 
-const categoryIcon = name => /email|cold/i.test(name)?Mail:/crm|pipeline/i.test(name)?Layers:/verif|security/i.test(name)?ShieldCheck:/lead|prospect/i.test(name)?Users:Workflow;
-const categoryDescription = name => /cold email/i.test(name)?'Compare cold email platforms, sending workflows, and deliverability evidence.':/crm/i.test(name)?'Compare customer relationship and pipeline tools side by side.':/verif/i.test(name)?'Compare email verification and data-quality capabilities.':/lead/i.test(name)?'Compare lead discovery, prospecting, and enrichment tools.':`Compare ${name.toLowerCase()} products using the evidence gathered in each run.`;
+const categoryIcon = name => name?.trim()?.split(/\s+/).length > 2 ? Layers : Workflow;
+const categoryDescription = name => `Compare ${name.toLowerCase()} products using the evidence gathered in each run.`;
 
 export function ComparisonHub(){
   const [searchParams,setSearchParams]=useSearchParams();
   const selected=searchParams.get('category')||'';
   const [state,setState]=useState({loading:true,error:'',reports:[],categories:[]});
   useEffect(()=>{let alive=true;Promise.all([getReports(),getCategories()]).then(([reports,categories])=>{if(alive)setState({loading:false,error:'',reports,categories})}).catch(error=>{if(alive)setState(s=>({...s,loading:false,error:error.message}))});return()=>{alive=false}},[]);
-  const uniqueReports=useMemo(()=>{const seen=new Set();return [...state.reports].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).filter(report=>{const m=report.matrix||{},a=m.a||{},b=m.b||{};const pair=[m.category||'',String(a.id||a.name||'').trim().toLowerCase(),String(b.id||b.name||'').trim().toLowerCase()].map(x=>String(x).toLowerCase()).sort().join('|');if(!pair.replaceAll('|',''))return true;if(seen.has(pair))return false;seen.add(pair);return true})},[state.reports]);
+  const uniqueReports=useMemo(()=>{
+    const seen=new Set();
+    return [...state.reports].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).filter(report=>{
+      const m=report.matrix||{},a=m.a||{},b=m.b||{};
+      const pair=[String(m.category||'').trim().toLowerCase(),String(a.id||a.name||'').trim().toLowerCase(),String(b.id||b.name||'').trim().toLowerCase()].join('|');
+      if(!pair.replaceAll('|',''))return true;
+      if(seen.has(pair))return false;
+      seen.add(pair);
+      return true;
+    });
+  },[state.reports]);
   const categoryRows=useMemo(()=>{
     const names=new Map();
-    for(const c of state.categories)names.set(c.name.trim().toLowerCase(),c.name);
-    for(const r of uniqueReports){const name=r.matrix?.category?.trim();if(name)names.set(name.toLowerCase(),name)}
-    return [...names.values()].map(name=>({name,reports:uniqueReports.filter(r=>(r.matrix?.category||'').toLowerCase()===name.toLowerCase())})).sort((a,b)=>a.name.localeCompare(b.name));
+    for(const c of state.categories){
+      const name = c.name?.trim();
+      if(name) names.set(name.toLowerCase(), name);
+    }
+    for(const r of uniqueReports){
+      const name = r.matrix?.category?.trim();
+      if(name) names.set(name.toLowerCase(), name);
+    }
+    return [...names.values()].map(name=>({
+      name,
+      reports: uniqueReports.filter(r => (r.matrix?.category||'').trim().toLowerCase() === name.toLowerCase())
+    })).sort((a,b)=>a.name.localeCompare(b.name));
   },[state.categories,uniqueReports]);
-  const current=categoryRows.find(c=>c.name.toLowerCase()===selected.toLowerCase());
+  const current=categoryRows.find(c=>c.name.trim().toLowerCase()===selected.trim().toLowerCase());
   return <>
     <header className="page-heading"><div><p className="eyebrow">COMPARISON LIBRARY</p><h1>{current?current.name:'Compare products'}</h1><p className="page-description">{current?categoryDescription(current.name):'Browse product comparisons by research category.'}</p></div></header>
     {state.error?<ErrorState error={state.error}/>:state.loading?<Loading/>:current?<>
@@ -55,9 +74,123 @@ export function Categories({ notify }) {
 
 export function Candidates(){
   const [rows,setRows]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[query,setQuery]=useState('');
-  async function reload(){setLoading(true);setError('');try{setRows(await getCandidates())}catch(e){setError(e.message)}finally{setLoading(false)}}
-  useEffect(()=>{reload()},[]);const shown=(rows||[]).filter(c=>`${c.name} ${c.domain} ${c.status}`.toLowerCase().includes(query.toLowerCase()));
-  return <><header className="page-heading"><div><p className="eyebrow">DISCOVERY</p><h1>Candidate pool</h1><p className="page-description">Products collected from discovery sources.</p></div></header><div className="toolbar"><div className="search-box"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search candidates" aria-label="Search candidates"/></div><span>{shown.length} candidates</span></div>{loading?<Loading/>:error?<ErrorState error={error} onRetry={reload}/>:shown.length?<div className="data-table-wrap panel"><table className="data-table"><thead><tr><th>Product</th><th>Domain</th><th>Source</th><th>Status</th></tr></thead><tbody>{shown.map(c=><tr key={c.id}><td><a className="product-link" href={c.url} target="_blank" rel="noreferrer">{c.name}<ExternalLink size={13}/></a></td><td>{c.domain}</td><td>{c.sources?.join(', ')||'—'}</td><td><span className={`badge badge-${c.status==='covered'?'completed':c.status==='rejected'?'failed':'pending'}`}>{c.status}</span></td></tr>)}</tbody></table></div>:<Empty title="Candidate pool is empty" body="Candidates appear here after discovery runs."/>}</>;
+  const [expandedId,setExpandedId]=useState(null);
+
+  async function reload(){
+    setLoading(true);
+    setError('');
+    try{
+      const data = await getCandidates();
+      console.log('[Frontend] Retrieved candidate pool (Product Hunt data):', data);
+      setRows(data);
+    }catch(e){
+      setError(e.message);
+    }finally{
+      setLoading(false);
+    }
+  }
+
+  useEffect(()=>{reload()},[]);
+
+  const shown=(rows||[]).filter(c=>{
+    const q=query.toLowerCase();
+    return `${c.name||''} ${c.domain||''} ${c.tagline||''} ${c.description||''} ${c.status||''}`.toLowerCase().includes(q);
+  });
+
+  return <>
+    <header className="page-heading">
+      <div>
+        <p className="eyebrow">DISCOVERY</p>
+        <h1>Candidate pool</h1>
+        <p className="page-description">Products collected from Product Hunt and discovery sources with metadata, upvotes, and descriptions.</p>
+      </div>
+    </header>
+    <div className="toolbar">
+      <div className="search-box">
+        <Search size={16}/>
+        <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search by name, tagline, description…" aria-label="Search candidates"/>
+      </div>
+      <button className="btn btn-secondary btn-small" onClick={()=>{console.log('[Frontend] Candidate Pool Log:', rows);alert('Logged '+ (rows?.length||0) +' candidates to browser console!');}} title="Print retrieved candidates to developer console">Print to Console</button>
+      <button className="btn btn-secondary btn-small" onClick={reload}>Refresh</button>
+      <span>{shown.length} {shown.length===1?'candidate':'candidates'}</span>
+    </div>
+    {loading?<Loading/>:error?<ErrorState error={error} onRetry={reload}/>:shown.length?(
+      <div className="data-table-wrap panel">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Domain</th>
+              <th>Votes</th>
+              <th>Source</th>
+              <th>Discovered</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map(c=>{
+              const isExpanded = expandedId===c.id;
+              return (
+                <Fragment key={c.id}>
+                  <tr>
+                    <td>
+                      <div>
+                        <a className="product-link" href={c.url} target="_blank" rel="noreferrer">
+                          {c.name}
+                          <ExternalLink size={13}/>
+                        </a>
+                        {c.tagline && <div className="muted-cell" style={{marginTop:2,maxWidth:320,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={c.tagline}>{c.tagline}</div>}
+                      </div>
+                    </td>
+                    <td><code>{c.domain}</code></td>
+                    <td>
+                      {c.ph_votes!=null ? (
+                        <span className="chip" style={{fontWeight:700,display:'inline-flex',alignItems:'center',gap:4}}>
+                          ▲ {c.ph_votes}
+                        </span>
+                      ) : <span className="muted-cell">—</span>}
+                    </td>
+                    <td>{c.sources?.map(s=><span key={s} className="chip">{s}</span>)||'—'}</td>
+                    <td className="muted-cell">{c.first_seen ? new Date(c.first_seen).toLocaleDateString() : '—'}</td>
+                    <td><span className={`badge badge-${c.status==='covered'?'completed':c.status==='rejected'?'failed':'pending'}`}>{c.status}</span></td>
+                    <td>
+                      <button className="icon-btn" style={{width:28,height:28}} onClick={()=>setExpandedId(isExpanded?null:c.id)} title={isExpanded?'Hide details':'View full details'} aria-label={isExpanded?'Hide details':'View details'}>
+                        {isExpanded?<ChevronUp size={15}/>:<ChevronDown size={15}/>}
+                      </button>
+                    </td>
+                  </tr>
+                  {isExpanded && (
+                    <tr style={{background:'var(--fog)'}}>
+                      <td colSpan={7} style={{padding:'12px 16px',whiteSpace:'normal'}}>
+                        <div style={{display:'grid',gap:8}}>
+                          {c.tagline && <div><strong>Tagline:</strong> <span>{c.tagline}</span></div>}
+                          {c.topics?.length>0 && (
+                            <div style={{display:'flex',alignItems:'center',gap:8}}>
+                              <strong>Categories (Product Hunt):</strong>
+                              <div className="chip-row" style={{display:'inline-flex',gap:4}}>
+                                {c.topics.map(t=><span key={t} className="chip">{t}</span>)}
+                              </div>
+                            </div>
+                          )}
+                          {c.description && <div><strong>Description:</strong> <span style={{color:'var(--ink-2)'}}>{c.description}</span></div>}
+                          <div style={{display:'flex',gap:16,fontSize:11,color:'var(--muted)'}}>
+                            <span><strong>URL:</strong> <a href={c.url} target="_blank" rel="noreferrer" className="text-link">{c.url}</a></span>
+                            {c.ph_votes!=null && <span><strong>Product Hunt Upvotes:</strong> {c.ph_votes}</span>}
+                            {c.first_seen && <span><strong>First Seen:</strong> {new Date(c.first_seen).toUTCString()}</span>}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    ):<Empty title="Candidate pool is empty" body="Candidates appear here after discovery runs."/>}
+  </>;
 }
 
 export function StyleGuide(){return <><header className="page-heading"><div><p className="eyebrow">DESIGN SYSTEM</p><h1>Style guide</h1><p className="page-description">Shared patterns and states used throughout Compare.</p></div></header><section className="section-block"><h2>Actions</h2><div className="guide-row panel"><button className="btn btn-primary"><Plus size={16}/> Primary</button><button className="btn btn-secondary">Secondary</button><button className="btn btn-quiet">Quiet</button><button className="btn btn-danger">Danger</button><button disabled className="btn btn-primary">Loading</button></div></section><section className="section-block"><h2>Statuses</h2><div className="guide-row panel">{['pending','running','completed','partial','failed'].map(x=><span key={x} className={`badge badge-${x}`}>{x}</span>)}</div></section><section className="section-block"><h2>Product colors</h2><div className="guide-row panel"><span className="product-letter letter-a">A</span><span className="color-swatch swatch-a">Product A · teal</span><span className="product-letter letter-b">B</span><span className="color-swatch swatch-b">Product B · plum</span></div></section><section className="section-block"><h2>Empty state</h2><div className="panel empty-state"><FileText/><h3>Nothing here yet</h3><p>Clear next steps make an empty view useful.</p><Link to="/" className="btn btn-secondary btn-small">Go to overview <ArrowRight size={15}/></Link></div></section></>}

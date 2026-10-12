@@ -13,7 +13,7 @@ def extract(html: str, url: str):
     sentences=[s.strip() for s in re.split(r"(?<=[.!?])\s+|\s*[•\n]+",text) if 20<=len(s.strip())<=400]
     patterns=[
         ("pricing",r"(?:\$|€|£|₹)\s?\d[\d,.]*(?:\s*/\s*(?:mo|month|year))?|free plan|contact sales|free trial"),
-        ("features",r"automate|workflow|analytics|campaign|feature|sequenc|personaliz|warmup|mailbox"),
+        ("features",r"feature|capabilit|workflow|automation|analytics|dashboard|report|collaboration|template|integration|api|data|insight"),
         ("integrations",r"integrat|\bAPI\b|webhook|Zapier|Salesforce|HubSpot|Slack|CRM"),
         ("security",r"security|SOC\s?2|GDPR|encryption|compliance|privacy|SSO|SAML"),
         ("limits",r"limit|up to|maximum|max\.?\s+\d|per day|per month|seats|users|credits|emails? per"),

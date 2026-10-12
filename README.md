@@ -14,14 +14,14 @@ data/                      Local database, page cache and screenshots
 
 ## Setup
 
-1. Use Python 3.10 or newer and create a virtual environment.
-2. Install the API dependencies with `pip install -r backend/requirements.txt`.
+1. Use Python 3.10 or newer and create a virtual environment at `backend/.venv` (`python -m venv backend/.venv`).
+2. Install the API dependencies with the virtual environment's interpreter: `backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt` on Windows, or `backend/.venv/bin/python -m pip install -r backend/requirements.txt` on macOS/Linux.
 3. Copy `.env.example` to `.env`. Set `PRODUCTHUNT_TOKEN` to enable Product Hunt discovery.
 4. Install the Playwright browser with `playwright install chromium` if screenshot capture is needed.
 5. In `frontend/`, run `npm install` and `npm run build`.
-6. Start the app from the repository root with `uvicorn backend.app.main:app --reload` and open `http://127.0.0.1:8000`.
+6. Start the app from the repository root with `backend/.venv/Scripts/python.exe -m uvicorn backend.app.main:app --reload` on Windows, or `backend/.venv/bin/python -m uvicorn backend.app.main:app --reload` on macOS/Linux. Open `http://127.0.0.1:8000`. Using the virtual environment's Python ensures Uvicorn and the app use the same installed dependencies.
 
-For React development with hot reload, run `npm run dev` in `frontend/` and `uvicorn backend.app.main:app --reload` from the repository root in a second terminal. Vite proxies API requests to FastAPI on port 8000 by default; set `VITE_API_PROXY_TARGET` if the backend uses another URL. React lives under `/app/` for views that would otherwise overlap with the documented REST API paths; the overview is `/`.
+For React development with hot reload, run `npm run dev` in `frontend/` and the virtual-environment Uvicorn command above from the repository root in a second terminal. Vite proxies API requests to FastAPI on port 8000 by default; set `VITE_API_PROXY_TARGET` if the backend uses another URL. React lives under `/app/` for views that would otherwise overlap with the documented REST API paths; the overview is `/`.
 
 The database and screenshots are stored in `data/`. Without the Product Hunt token, discovery returns no products and a run explains that it needs a discovery source. Reports are generated from retrieved page evidence; the deterministic report path works without an LLM key.
 

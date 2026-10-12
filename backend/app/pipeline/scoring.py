@@ -46,7 +46,7 @@ def _phrase_evidence(text: str, phrase: str) -> dict | None:
     return None
 
 
-def category_verification_rules(category: str, profile=None, keywords=None) -> dict:
+def category_verification_rules(category: str, profile=None, keywords=None, capability_aliases=None) -> dict:
     """Resolve strict, explainable product-fit requirements for a category."""
     profile = profile if isinstance(profile, dict) else {}
     capabilities = profile.get("must_have_any")
@@ -58,15 +58,26 @@ def category_verification_rules(category: str, profile=None, keywords=None) -> d
         # stricter fallback, but a category with no usable phrases fails closed.
         required = [str(value).strip() for value in (keywords or []) if len(_tokens(str(value))) >= 2]
         source = "configured_category_keywords"
+        if len(_tokens(category)) >= 2 and category.strip() not in required:
+            required.insert(0, category.strip())
     required = list(dict.fromkeys(required))
+    alias_lookup = {
+        " ".join(str(key).casefold().split()): [str(alias).strip() for alias in values if str(alias).strip()]
+        for key, values in (capability_aliases or {}).items()
+        if isinstance(values, list)
+    }
     return {
         "ready": len(required) >= 2,
         "required_phrases": required,
         "minimum_matches": 2,
+        "capability_aliases": {
+            phrase: alias_lookup.get(" ".join(phrase.casefold().split()), [])
+            for phrase in required
+        },
         "profile_source": source,
         "adjacent_phrases": [str(value).strip() for value in profile.get("adjacent_not_accepted", []) if str(value).strip()],
         "negative_phrases": [str(value).strip() for value in profile.get("negative_keywords", []) if str(value).strip()],
-        "category": category,
+        "category": category.strip(),
     }
 
 
@@ -83,8 +94,15 @@ def verify_category_fit(candidate: dict, rules: dict) -> dict:
     ))
     matched = []
     for phrase in rules.get("required_phrases", []):
-        evidence = _phrase_evidence(homepage_text, phrase)
+        aliases = rules.get("capability_aliases", {}).get(phrase, [])
+        evidence = None
+        for alternative in [phrase, *aliases]:
+            evidence = _phrase_evidence(homepage_text, alternative)
+            if evidence:
+                break
         if evidence:
+            evidence["matched_as"] = evidence["phrase"]
+            evidence["phrase"] = phrase
             matched.append(evidence)
     adjacent = [evidence for phrase in rules.get("adjacent_phrases", [])
                 if (evidence := _phrase_evidence(metadata_text, phrase))]

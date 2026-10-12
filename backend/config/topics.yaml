@@ -5,6 +5,13 @@ page_topics:
   integrations: "integrations, connect with other tools, API, plugins"
   trust: "security, customers, case studies, testimonials, compliance"
 required_topics: [pricing, features]
+page_topic_min_score: 0.55
+topic_fact_fields:
+  pricing: [pricing, limits, limitations]
+  features: [features, limits, limitations]
+  how_it_works: [features, limits, limitations]
+  integrations: [integrations, limits, limitations]
+  trust: [security, limitations]
 candidate_check_limit: 100
 # Category-specific vocabulary for matching broad categories to product descriptions.
 category_keywords:
@@ -15,6 +22,21 @@ category_keywords:
     - sales pipeline
     - deal management
     - opportunity management
+  cold email:
+    - cold email
+    - cold outreach
+    - outbound email
+    - email outreach
+    - email sequencing
+    - sales sequence
+    - email personalization
+    - email deliverability
+  ai coding agents:
+    - AI coding agent
+    - autonomous coding agent
+    - agentic coding
+    - AI developer agent
+    - code generation agent
   cold email generation:
     - cold email
     - cold outreach
@@ -32,9 +54,26 @@ category_keywords:
     - outbound sales
     - prospecting software
     - sales sequences
+category_capability_aliases:
+  cold email:
+    automated email sequencing: [email sequences, automated outreach sequences, outbound email campaigns, sales email sequences]
+    email account warming: [email warmup, inbox warmup, mailbox warmup, warm up email accounts]
+    inbox rotation: [mailbox rotation, rotate inboxes, multiple sending inboxes, multiple email accounts]
+    personalized merge tags: [email personalization, personalized cold emails, personalized outreach emails, dynamic email content]
+    deliverability tracking: [email deliverability, deliverability monitoring, email delivery tracking, inbox placement monitoring]
+  ai coding agents:
+    autonomous multi-file code editing: [AI coding agent, coding agent, AI agent for coding, generate and modify code, edit code across repositories]
+    automated execution of terminal commands and tests: [run terminal commands, run tests, runs the tests, use terminal to execute code, from the terminal]
+    automated bug diagnosis and patch generation: [automated bug fixing, debug and fix code, fix coding bugs, bug fix, generate code patches]
+    repository-level code context parsing and reasoning: [understand the codebase, repository context, codebase-aware coding, understand a repository]
+    autonomous generation of pull requests: [generate pull requests, create pull requests, open pull requests, opens the PR, open a PR, pull request automation]
 category_topic_slugs:
   crm pipeline:
     - crm
+  cold email:
+    - email
+    - email-marketing
+    - sales
   cold email generation:
     - email
     - email-marketing

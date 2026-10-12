@@ -15,8 +15,8 @@ class Category(SQLModel, table=True):
     ph_topic_slugs_json: str = "[]"
     active: bool = True
     profile_json: str = "{}"
-    confirmed: bool = True
-    validation_status: str = "confirmed"
+    confirmed: bool = False
+    validation_status: str = "pending_review"
 
 class CategoryValidationCache(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("normalized_name", name="uq_category_validation_name"),)
@@ -83,18 +83,21 @@ class StageLog(SQLModel, table=True):
 
 class Page(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: Optional[int] = Field(default=None, index=True, foreign_key="run.id")
     candidate_id: int = Field(index=True, foreign_key="candidate.id")
     url: str
     topic: str = "home"
     score: float = 0
     status_code: int = 0
     method: str = "httpx"
+    matched_topics_json: str = "[]"
     text_hash: str = ""
     text: str = ""
     fetched_at: datetime = Field(default_factory=utcnow)
 
 class Fact(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: Optional[int] = Field(default=None, index=True, foreign_key="run.id")
     candidate_id: int = Field(index=True, foreign_key="candidate.id")
     field: str
     value: str
@@ -151,8 +154,24 @@ def init_db():
         if "profile_json" not in columns: connection.exec_driver_sql("ALTER TABLE category ADD COLUMN profile_json TEXT NOT NULL DEFAULT '{}'" )
         if "confirmed" not in columns: connection.exec_driver_sql("ALTER TABLE category ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT 1")
         if "validation_status" not in columns: connection.exec_driver_sql("ALTER TABLE category ADD COLUMN validation_status VARCHAR NOT NULL DEFAULT 'confirmed'")
+        for table in ("page", "fact"):
+            table_columns={column["name"] for column in inspect(engine).get_columns(table)}
+            if "run_id" not in table_columns:
+                connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN run_id INTEGER REFERENCES run(id)")
+            connection.exec_driver_sql(f"CREATE INDEX IF NOT EXISTS ix_{table}_run_id ON {table}(run_id)")
+        page_columns={column["name"] for column in inspect(engine).get_columns("page")}
+        if "matched_topics_json" not in page_columns:
+            connection.exec_driver_sql("ALTER TABLE page ADD COLUMN matched_topics_json TEXT NOT NULL DEFAULT '[]'")
     with Session(engine) as s:
         if not s.exec(select(Category)).first():
-            s.add(Category(name=get_settings().category, keywords_json="[]", active=True)); s.commit()
+            s.add(Category(name=get_settings().category, keywords_json="[]", active=False, confirmed=False, validation_status="pending_review")); s.commit()
+        stale=s.exec(select(Category).where(Category.confirmed==True, Category.profile_json=="{}")).all()
+        for category in stale:
+            category.confirmed=False
+            category.active=False
+            category.validation_status="pending_review"
+            s.add(category)
+        if stale:
+            s.commit()
 def session(): return Session(engine)
 def dump(obj): return json.loads(obj) if obj else {}
